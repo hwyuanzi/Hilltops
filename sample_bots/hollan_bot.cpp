@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <utility>
@@ -45,6 +47,55 @@ struct Problem {
             }
         }
     }
+};
+
+struct Chains {
+    vector<int> parent, size, start, finish;
+
+    explicit Chains(int n = 0) : parent(n), size(n, 1), start(n), finish(n) {
+        iota(parent.begin(), parent.end(), 0);
+        iota(start.begin(), start.end(), 0);
+        iota(finish.begin(), finish.end(), 0);
+    }
+
+    int find(int x) {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        return x;
+    }
+
+    bool add_edge(int from, int to) {
+        int a = find(from), b = find(to);
+        if (a == b) return true;
+        int new_start = start[a], new_finish = finish[b];
+        if (size[a] < size[b]) swap(a, b);
+        parent[b] = a;
+        size[a] += size[b];
+        start[a] = new_start;
+        finish[a] = new_finish;
+        return false;
+    }
+};
+
+struct Weights {
+    double close = 10000.0;
+    double reserved = 300.0;
+    double ready = 20.0;
+    double expose = 2.0;
+    double new_frontier = 1.0;
+    double selected_neighbors = 0.3;
+    double future_rank = 0.0;
+    double finish_delay = 0.0;
+    double noise = 0.0;
+    int lookahead = 12;
+};
+
+struct Candidate {
+    vector<int> order;
+    int cycles = -1;
+    int worst = numeric_limits<int>::max();
 };
 
 // Guaranteed connected-prefix ordering. It fixes every rank whose original
@@ -106,7 +157,643 @@ static int worst_distance(const Problem& p, const vector<int>& order) {
     return answer;
 }
 
-static bool connected_order(const Problem& p, const vector<int>& order) {
+static Candidate evaluate(const Problem& p, vector<int> order) {
+    Candidate c;
+    c.cycles = cycle_count(p, order);
+    c.worst = worst_distance(p, order);
+    c.order = std::move(order);
+    return c;
+}
+
+static bool better(const Candidate& a, const Candidate& b) {
+    return a.cycles > b.cycles || (a.cycles == b.cycles && a.worst < b.worst);
+}
+
+class Builder {
+public:
+    const Problem& p;
+    mt19937_64& rng;
+    Weights w;
+    vector<unsigned char> used, in_frontier;
+    vector<int> frontier, order;
+    Chains chains;
+    int cycles = 0;
+
+    Builder(const Problem& problem, mt19937_64& generator, const Weights& weights)
+        : p(problem), rng(generator), w(weights), used(p.n, 0),
+          in_frontier(p.n, 0), chains(p.n) {
+        order.reserve(p.n);
+        frontier.reserve(p.n);
+    }
+
+    void add_cell(int v) {
+        int k = static_cast<int>(order.size());
+        used[v] = 1;
+        in_frontier[v] = 0;
+        order.push_back(v);
+        cycles += chains.add_edge(k, p.rank_at[v]);
+        for (int u : p.nbr[v]) {
+            if (!used[u] && !in_frontier[u]) {
+                in_frontier[u] = 1;
+                frontier.push_back(u);
+            }
+        }
+    }
+
+    bool replay_prefix(const vector<int>& prefix, int length) {
+        for (int k = 0; k < length; ++k) {
+            int v = prefix[k];
+            if (used[v]) return false;
+            if (k && !in_frontier[v]) return false;
+            add_cell(v);
+        }
+        return true;
+    }
+
+    double score(int v, int k) {
+        int label = p.rank_at[v];
+        int rk = chains.find(k), ra = chains.find(label);
+        bool closes = rk == ra;
+        int selected_nbr = 0, fresh = 0;
+        double expose_score = 0.0;
+        for (int u : p.nbr[v]) {
+            if (used[u]) {
+                ++selected_nbr;
+            } else if (!in_frontier[u]) {
+                ++fresh;
+                int d = p.rank_at[u] - k;
+                if (1 <= d && d <= w.lookahead)
+                    expose_score += 1.0 / d;
+            }
+        }
+
+        bool is_reserved = false;
+        if (!closes && chains.size[ra] > 1) {
+            int endpoint = chains.finish[ra];
+            is_reserved = endpoint > k;
+        }
+
+        int chain_start = chains.start[rk];
+        int chain_finish = chains.finish[ra];
+        int start_cell = p.pos[chain_start];
+        bool ready = !closes && (in_frontier[start_cell] ||
+                     find(p.nbr[v].begin(), p.nbr[v].end(), start_cell) != p.nbr[v].end());
+
+        double result = (closes ? w.close : 0.0)
+                      - (is_reserved ? w.reserved : 0.0)
+                      + (ready ? w.ready : 0.0)
+                      + w.expose * expose_score
+                      + w.new_frontier * fresh
+                      + w.selected_neighbors * selected_nbr
+                      + w.future_rank * (double(label - k) / max(1, p.n))
+                      + w.finish_delay * (double(chain_finish - k) / max(1, p.n));
+        if (w.noise > 0.0) {
+            double unit = double(rng() >> 11) * (1.0 / 9007199254740992.0);
+            result += w.noise * (2.0 * unit - 1.0);
+        }
+        return result;
+    }
+
+    vector<int> finish() {
+        while (static_cast<int>(order.size()) < p.n) {
+            int k = static_cast<int>(order.size());
+            int chosen = -1;
+            double best_score = -numeric_limits<double>::infinity();
+            for (int v : frontier) if (!used[v]) {
+                double s = score(v, k);
+                if (s > best_score || (s == best_score && v < chosen)) {
+                    best_score = s;
+                    chosen = v;
+                }
+            }
+            add_cell(chosen);
+        }
+        return std::move(order);
+    }
+};
+
+static vector<int> greedy_order(const Problem& p, mt19937_64& rng,
+                                const Weights& w, int root,
+                                const vector<int>* prefix = nullptr,
+                                int prefix_length = 0) {
+    Builder b(p, rng, w);
+    if (prefix && prefix_length > 0) {
+        b.replay_prefix(*prefix, prefix_length);
+    } else {
+        b.add_cell(root);
+    }
+    return b.finish();
+}
+
+struct RepairWeights {
+    double expose_displaced = 100.0;
+    double expose_upcoming = 5.0;
+    double new_frontier = 1.0;
+    double selected_neighbors = 0.0;
+    double delay = 0.0;
+    double noise = 0.0;
+    int lookahead = 16;
+};
+
+// Start with the identity target (zero swaps). Whenever its next cell is not
+// connected, transpose that entry with a frontier entry. This keeps an exact,
+// explicit repair certificate and tends to close the resulting 2-cycles when
+// the displaced cell is exposed before its new position is reached.
+static vector<int> repair_order(const Problem& p, mt19937_64& rng,
+                                const RepairWeights& w) {
+    vector<int> seq(p.n), where(p.n), order;
+    iota(seq.begin(), seq.end(), 0);
+    iota(where.begin(), where.end(), 0);
+    order.reserve(p.n);
+    vector<unsigned char> used(p.n, 0), in_frontier(p.n, 0);
+    vector<int> frontier;
+    frontier.reserve(p.n);
+
+    auto select = [&](int v) {
+        used[v] = 1;
+        in_frontier[v] = 0;
+        order.push_back(v);
+        for (int u : p.nbr[v]) if (!used[u] && !in_frontier[u]) {
+            in_frontier[u] = 1;
+            frontier.push_back(u);
+        }
+    };
+
+    // Fixing rank zero is always legal and preserves a cycle.
+    select(p.pos[0]);
+    for (int k = 1; k < p.n; ++k) {
+        int current_cell = p.pos[seq[k]];
+        if (!in_frontier[current_cell]) {
+            int chosen_label = -1;
+            double best_score = -numeric_limits<double>::infinity();
+            int displaced = seq[k];
+            int displaced_cell = p.pos[displaced];
+            for (int v : frontier) if (!used[v]) {
+                int label = p.rank_at[v];
+                int j = where[label];
+                if (j <= k) continue;
+                int fresh = 0, selected_nbr = 0;
+                double upcoming = 0.0;
+                bool exposes_displaced = false;
+                for (int u : p.nbr[v]) {
+                    if (used[u]) ++selected_nbr;
+                    else if (!in_frontier[u]) ++fresh;
+                    if (u == displaced_cell) exposes_displaced = true;
+                }
+                for (int d = 1; d <= w.lookahead && k + d < p.n; ++d) {
+                    int u = p.pos[seq[k + d]];
+                    if (!used[u] && !in_frontier[u] &&
+                        find(p.nbr[v].begin(), p.nbr[v].end(), u) != p.nbr[v].end())
+                        upcoming += 1.0 / d;
+                }
+                double score = (exposes_displaced ? w.expose_displaced : 0.0)
+                             + w.expose_upcoming * upcoming
+                             + w.new_frontier * fresh
+                             + w.selected_neighbors * selected_nbr
+                             + w.delay * double(j - k) / max(1, p.n);
+                if (w.noise > 0.0) {
+                    double unit = double(rng() >> 11) * (1.0 / 9007199254740992.0);
+                    score += w.noise * (2.0 * unit - 1.0);
+                }
+                if (score > best_score || (score == best_score && label < chosen_label)) {
+                    best_score = score;
+                    chosen_label = label;
+                }
+            }
+            int j = where[chosen_label];
+            int other = seq[j];
+            swap(seq[k], seq[j]);
+            where[displaced] = j;
+            where[other] = k;
+            current_cell = p.pos[seq[k]];
+        }
+        select(current_cell);
+    }
+    return order;
+}
+
+// Swapping adjacent targets changes the cycle count by exactly one. If the two
+// source ranks are in the same permutation cycle it splits that cycle, saving
+// one swap. The connectivity test below is the only validity condition needed.
+static void adjacent_improve(const Problem& p, Candidate& candidate) {
+    bool changed = true;
+    vector<int> cycle_id(p.n);
+    while (changed) {
+        changed = false;
+        vector<unsigned char> seen(p.n, 0);
+        int id = 0;
+        for (int s = 0; s < p.n; ++s) if (!seen[s]) {
+            for (int v = s; !seen[v]; v = p.rank_at[candidate.order[v]]) {
+                seen[v] = 1;
+                cycle_id[v] = id;
+            }
+            ++id;
+        }
+        vector<int> position(p.n);
+        for (int i = 0; i < p.n; ++i) position[candidate.order[i]] = i;
+        for (int i = 1; i + 1 < p.n; ++i) {
+            if (cycle_id[i] != cycle_id[i + 1]) continue;
+            int later = candidate.order[i + 1];
+            bool touches_earlier = false;
+            for (int u : p.nbr[later]) if (position[u] < i) {
+                touches_earlier = true;
+                break;
+            }
+            if (!touches_earlier) continue;
+            swap(candidate.order[i], candidate.order[i + 1]);
+            ++candidate.cycles;
+            changed = true;
+            break;
+        }
+    }
+    candidate.worst = worst_distance(p, candidate.order);
+}
+
+static bool valid_target_transposition(const Problem& p, const vector<int>& order,
+                                       const vector<int>& position, int i, int j) {
+    int x = order[i], y = order[j];
+    for (int t = i; t <= j; ++t) {
+        int v = (t == i ? y : (t == j ? x : order[t]));
+        bool touches = (t == 0);
+        for (int u : p.nbr[v]) {
+            int q = position[u];
+            if (q == i) q = j;
+            else if (q == j) q = i;
+            if (q < t) {
+                touches = true;
+                break;
+            }
+        }
+        if (!touches) return false;
+    }
+    return true;
+}
+
+// A transposition of two images in the same permutation cycle splits it and
+// saves exactly one swap. Search that mathematically improving neighborhood,
+// accepting only moves whose affected connected-prefix interval stays valid.
+static void transposition_improve(const Problem& p, Candidate& candidate,
+                                  mt19937_64& rng, int failed_limit,
+                                  const chrono::steady_clock::time_point& deadline) {
+    if (p.n < 3) return;
+    int failed = 0;
+    vector<int> cycle_id(p.n), position(p.n);
+    while (failed < failed_limit && chrono::steady_clock::now() < deadline) {
+        vector<unsigned char> seen(p.n, 0);
+        int id = 0;
+        for (int s = 0; s < p.n; ++s) if (!seen[s]) {
+            for (int v = s; !seen[v]; v = p.rank_at[candidate.order[v]]) {
+                seen[v] = 1;
+                cycle_id[v] = id;
+            }
+            ++id;
+        }
+        for (int t = 0; t < p.n; ++t) position[candidate.order[t]] = t;
+
+        bool accepted = false;
+        int batch = min(failed_limit - failed, max(64, 8 * p.n));
+        for (int attempt = 0; attempt < batch; ++attempt) {
+            int i = int(rng() % (p.n - 1));
+            int j = i + 1 + int(rng() % (p.n - i - 1));
+            ++failed;
+            if (cycle_id[i] != cycle_id[j]) continue;
+            if (!valid_target_transposition(p, candidate.order, position, i, j)) continue;
+            swap(candidate.order[i], candidate.order[j]);
+            ++candidate.cycles;
+            failed = 0;
+            accepted = true;
+            break;
+        }
+        if (!accepted && batch == 0) break;
+    }
+    candidate.worst = worst_distance(p, candidate.order);
+}
+
+static uint64_t matrix_seed(const Problem& p) {
+    uint64_t h = 0x9e3779b97f4a7c15ULL;
+    for (int x : p.rank_at) {
+        h ^= uint64_t(x + 0x9e37) + (h << 6) + (h >> 2);
+        h *= 0xbf58476d1ce4e5b9ULL;
+    }
+    return h;
+}
+
+struct BeamNode {
+    vector<int> order;
+    vector<unsigned char> used, in_frontier;
+    vector<int> frontier;
+    Chains chains;
+    int cycles = 0;
+    double merit = 0.0;
+
+    explicit BeamNode(int n = 0)
+        : used(n, 0), in_frontier(n, 0), chains(n) {
+        order.reserve(n);
+        frontier.reserve(n);
+    }
+};
+
+static void beam_add(const Problem& p, BeamNode& s, int v) {
+    int k = static_cast<int>(s.order.size());
+    s.used[v] = 1;
+    s.in_frontier[v] = 0;
+    s.order.push_back(v);
+    s.cycles += s.chains.add_edge(k, p.rank_at[v]);
+    for (int u : p.nbr[v]) if (!s.used[u] && !s.in_frontier[u]) {
+        s.in_frontier[u] = 1;
+        s.frontier.push_back(u);
+    }
+}
+
+static double beam_merit(const Problem& p, BeamNode& s) {
+    int k = static_cast<int>(s.order.size());
+    int promised = 0, fixed = 0;
+    for (int root = 0; root < p.n; ++root) if (s.chains.find(root) == root) {
+        int a = s.chains.start[root], z = s.chains.finish[root];
+        if (z >= k && s.in_frontier[p.pos[a]]) {
+            if (s.chains.size[root] > 1) ++promised;
+            else if (a == z) ++fixed;
+        }
+    }
+    int active_frontier = 0;
+    for (int v : s.frontier) active_frontier += !s.used[v];
+    return 1000000.0 * s.cycles + 2000.0 * promised
+         + 30.0 * fixed + active_frontier;
+}
+
+static vector<int> beam_order(const Problem& p, int width, int branch,
+                              const chrono::steady_clock::time_point& deadline) {
+    BeamNode initial(p.n);
+    beam_add(p, initial, p.pos[0]);
+    vector<BeamNode> beam;
+    beam.push_back(std::move(initial));
+    for (int k = 1; k < p.n; ++k) {
+        if (chrono::steady_clock::now() >= deadline) return {};
+        vector<BeamNode> next;
+        next.reserve(width * branch);
+        for (BeamNode& state : beam) {
+            vector<pair<double, int>> choices;
+            for (int v : state.frontier) if (!state.used[v]) {
+                int label = p.rank_at[v];
+                int a = state.chains.find(k), b = state.chains.find(label);
+                bool closes = a == b;
+                bool reserved = !closes && state.chains.size[b] > 1
+                             && state.chains.finish[b] > k;
+                int fresh = 0, selected = 0;
+                for (int u : p.nbr[v]) {
+                    fresh += !state.used[u] && !state.in_frontier[u];
+                    selected += state.used[u];
+                }
+                double score = (closes ? 100000.0 : 0.0)
+                             - (reserved ? 5000.0 : 0.0)
+                             + 3.0 * fresh + selected
+                             + 0.001 * label;
+                choices.push_back({score, v});
+            }
+            int keep = min(branch, static_cast<int>(choices.size()));
+            partial_sort(choices.begin(), choices.begin() + keep, choices.end(),
+                         [](const auto& a, const auto& b) { return a.first > b.first; });
+            for (int q = 0; q < keep; ++q) {
+                BeamNode child = state;
+                beam_add(p, child, choices[q].second);
+                child.merit = beam_merit(p, child);
+                next.push_back(std::move(child));
+            }
+        }
+        int keep = min(width, static_cast<int>(next.size()));
+        partial_sort(next.begin(), next.begin() + keep, next.end(),
+                     [](const BeamNode& a, const BeamNode& b) { return a.merit > b.merit; });
+        next.resize(keep);
+        beam = std::move(next);
+    }
+    int best = 0;
+    for (int i = 1; i < static_cast<int>(beam.size()); ++i)
+        if (beam[i].cycles > beam[best].cycles) best = i;
+    return std::move(beam[best].order);
+}
+
+class ExactSearch {
+    struct Undo {
+        bool merged = false;
+        int parent_root = -1, child_root = -1;
+        int old_size = 0, old_start = 0, old_finish = 0;
+    };
+
+    const Problem& p;
+    Candidate& best;
+    chrono::steady_clock::time_point deadline;
+    vector<int> parent, sz, chain_start, chain_finish, order;
+    vector<uint64_t> neighbor_mask;
+    uint64_t nodes = 0;
+    bool timed_out = false;
+
+    int find_root(int x) const {
+        while (parent[x] != x) x = parent[x];
+        return x;
+    }
+
+    bool add_edge(int from, int to, Undo& undo) {
+        int a = find_root(from), b = find_root(to);
+        if (a == b) return true;
+        int new_start = chain_start[a], new_finish = chain_finish[b];
+        if (sz[a] < sz[b]) swap(a, b);
+        undo = {true, a, b, sz[a], chain_start[a], chain_finish[a]};
+        parent[b] = a;
+        sz[a] += sz[b];
+        chain_start[a] = new_start;
+        chain_finish[a] = new_finish;
+        return false;
+    }
+
+    void rollback(const Undo& u) {
+        if (!u.merged) return;
+        parent[u.child_root] = u.child_root;
+        sz[u.parent_root] = u.old_size;
+        chain_start[u.parent_root] = u.old_start;
+        chain_finish[u.parent_root] = u.old_finish;
+    }
+
+    void dfs(uint64_t used, uint64_t frontier, int cycles) {
+        if ((++nodes & 1023ULL) == 0 && chrono::steady_clock::now() >= deadline) {
+            timed_out = true;
+            return;
+        }
+        int k = static_cast<int>(order.size());
+        if (k == p.n) {
+            if (cycles > best.cycles) best = evaluate(p, order);
+            return;
+        }
+
+        bool can_close_now = false;
+        for (int v = 0; v < p.n; ++v) if (frontier & (1ULL << v)) {
+            if (find_root(k) == find_root(p.rank_at[v])) {
+                can_close_now = true;
+                break;
+            }
+        }
+        int upper = cycles + (p.n - k) - (can_close_now ? 0 : 1);
+        if (upper <= best.cycles) return;
+
+        vector<int> choices;
+        for (int v = 0; v < p.n; ++v) if (frontier & (1ULL << v))
+            choices.push_back(v);
+        sort(choices.begin(), choices.end(), [&](int a, int b) {
+            bool ca = find_root(k) == find_root(p.rank_at[a]);
+            bool cb = find_root(k) == find_root(p.rank_at[b]);
+            if (ca != cb) return ca > cb;
+            return p.rank_at[a] < p.rank_at[b];
+        });
+
+        for (int v : choices) {
+            Undo undo;
+            bool closed = add_edge(k, p.rank_at[v], undo);
+            order.push_back(v);
+            uint64_t bit = 1ULL << v;
+            uint64_t next_used = used | bit;
+            uint64_t next_frontier = (frontier | neighbor_mask[v]) & ~next_used;
+            dfs(next_used, next_frontier, cycles + closed);
+            order.pop_back();
+            rollback(undo);
+            if (timed_out) return;
+        }
+    }
+
+public:
+    ExactSearch(const Problem& problem, Candidate& incumbent,
+                chrono::steady_clock::time_point stop)
+        : p(problem), best(incumbent), deadline(stop), parent(p.n), sz(p.n, 1),
+          chain_start(p.n), chain_finish(p.n), neighbor_mask(p.n, 0) {
+        iota(parent.begin(), parent.end(), 0);
+        iota(chain_start.begin(), chain_start.end(), 0);
+        iota(chain_finish.begin(), chain_finish.end(), 0);
+        order.reserve(p.n);
+        for (int v = 0; v < p.n; ++v)
+            for (int u : p.nbr[v]) neighbor_mask[v] |= 1ULL << u;
+    }
+
+    bool run() {
+        vector<int> roots(p.n);
+        iota(roots.begin(), roots.end(), 0);
+        stable_sort(roots.begin(), roots.end(), [&](int a, int b) {
+            bool ar = a == p.pos[0], br = b == p.pos[0];
+            if (ar != br) return ar;
+            return a < b;
+        });
+        for (int root : roots) {
+            Undo undo;
+            bool closed = add_edge(0, p.rank_at[root], undo);
+            order.push_back(root);
+            dfs(1ULL << root, neighbor_mask[root] & ~(1ULL << root), closed);
+            order.pop_back();
+            rollback(undo);
+            if (timed_out) break;
+        }
+        return !timed_out;
+    }
+};
+
+static Candidate solve_for(const Problem& p, double seconds) {
+    Candidate best = evaluate(p, baseline_order(p));
+    adjacent_improve(p, best);
+    if (p.n <= 1 || seconds <= 0.0) return best;
+
+    mt19937_64 rng(matrix_seed(p));
+    const vector<RepairWeights> repair_deterministic = {
+        {1000, 10, 1, 0, 0, 0, 16},
+        {100, 5, 3, -1, 2, 0, 24},
+        {30, 15, -1, 2, -2, 0, 10},
+        {3000, 0, 0, 0, 0, 0, 8},
+    };
+    for (const RepairWeights& w : repair_deterministic) {
+        Candidate c = evaluate(p, repair_order(p, rng, w));
+        adjacent_improve(p, c);
+        if (better(c, best)) best = std::move(c);
+    }
+    const vector<Weights> deterministic = {
+        {10000, 1000, 80, 4, 1, 0.5, 0, 0, 0, 16},
+        {10000, 300, 30, 2, 2, 0.2, 2, -1, 0, 10},
+        {10000, 100, 10, 1, -1, 1.5, -2, 2, 0, 24},
+        {10000, 3000, 150, 0, 0.5, 0, 1, -2, 0, 8},
+        {300, 100, 20, 3, 1, 0.5, 0, 0, 0, 16},
+    };
+    for (const Weights& w : deterministic) {
+        Candidate c = evaluate(p, greedy_order(p, rng, w, p.pos[0]));
+        adjacent_improve(p, c);
+        if (better(c, best)) best = std::move(c);
+    }
+
+    auto raw_deadline = chrono::steady_clock::now() + chrono::duration<double>(seconds);
+    auto deadline = chrono::time_point_cast<chrono::steady_clock::duration>(raw_deadline);
+    transposition_improve(p, best, rng, 30 * p.n, deadline);
+    if (chrono::steady_clock::now() < deadline) {
+        auto beam_raw_stop = chrono::steady_clock::now()
+                           + chrono::duration<double>(min(2.0, seconds * 0.12));
+        auto beam_stop = min(deadline,
+            chrono::time_point_cast<chrono::steady_clock::duration>(beam_raw_stop));
+        int width = 64;
+        vector<int> order = beam_order(p, width, 4, beam_stop);
+        if (!order.empty()) {
+            Candidate c = evaluate(p, std::move(order));
+            adjacent_improve(p, c);
+            if (better(c, best)) best = std::move(c);
+        }
+    }
+    if (p.n <= 36 && chrono::steady_clock::now() < deadline) {
+        auto exact_raw_stop = chrono::steady_clock::now()
+                            + chrono::duration<double>(min(5.0, seconds * 0.20));
+        auto exact_stop = min(deadline,
+            chrono::time_point_cast<chrono::steady_clock::duration>(exact_raw_stop));
+        ExactSearch exact(p, best, exact_stop);
+        if (exact.run()) return best;
+    }
+    int iteration = 0;
+    while (chrono::steady_clock::now() < deadline) {
+        if ((iteration & 1) == 1) {
+            RepairWeights rw = repair_deterministic[rng() % repair_deterministic.size()];
+            rw.noise = 2.0 + double(rng() % 10000) / 100.0;
+            rw.expose_displaced *= 0.2 + double(rng() % 3000) / 1000.0;
+            rw.expose_upcoming *= double(rng() % 3000) / 1000.0;
+            rw.new_frontier += double(int(rng() % 801) - 400) / 100.0;
+            rw.delay += double(int(rng() % 801) - 400) / 50.0;
+            Candidate c = evaluate(p, repair_order(p, rng, rw));
+            adjacent_improve(p, c);
+            if (better(c, best)) {
+                best = std::move(c);
+                transposition_improve(p, best, rng, 12 * p.n, deadline);
+            }
+            ++iteration;
+            continue;
+        }
+        Weights w = deterministic[rng() % deterministic.size()];
+        w.noise = 5.0 + double(rng() % 4000) / 100.0;
+        w.reserved *= 0.5 + double(rng() % 2000) / 1000.0;
+        w.ready *= 0.5 + double(rng() % 2000) / 1000.0;
+        w.expose *= double(rng() % 2000) / 1000.0;
+        w.new_frontier += double(int(rng() % 601) - 300) / 100.0;
+        w.future_rank += double(int(rng() % 601) - 300) / 50.0;
+
+        vector<int> order;
+        if ((iteration++ & 3) != 0 && p.n >= 8) {
+            int hi = max(2, p.n - 2);
+            int cut = 1 + int(rng() % hi);
+            // Bias toward large retained prefixes, with occasional broad restart.
+            if (rng() & 1) cut = max(1, p.n - 1 - int(rng() % max(2, p.n / 3)));
+            order = greedy_order(p, rng, w, best.order[0], &best.order, cut);
+        } else {
+            int root = (iteration % 17 == 0) ? int(rng() % p.n) : p.pos[0];
+            order = greedy_order(p, rng, w, root);
+        }
+        Candidate c = evaluate(p, std::move(order));
+        adjacent_improve(p, c);
+        if (better(c, best)) {
+            best = std::move(c);
+            transposition_improve(p, best, rng, 12 * p.n, deadline);
+        }
+    }
+    return best;
+}
+
+[[maybe_unused]] static bool connected_order(const Problem& p, const vector<int>& order) {
     if (static_cast<int>(order.size()) != p.n) return false;
     vector<unsigned char> used(p.n, 0);
     for (int k = 0; k < p.n; ++k) {
@@ -146,6 +833,8 @@ static vector<vector<int>> swaps_for_order(const Problem& p,
 
 vector<vector<int>> get_swaps(vector<vector<int>> matrix) {
     hollan::Problem problem(matrix);
-    vector<int> order = hollan::baseline_order(problem);
-    return hollan::swaps_for_order(problem, order);
+    // The official allowance is 120 wall-clock seconds. Ninety-eight seconds
+    // leaves ample time for wrapper I/O, scheduling jitter, and submission.
+    hollan::Candidate best = hollan::solve_for(problem, 98.0);
+    return hollan::swaps_for_order(problem, best.order);
 }

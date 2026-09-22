@@ -55,11 +55,15 @@ static vector<vector<int>> apply_swaps(vector<vector<int>> a,
 }
 
 int main(int argc, char** argv) {
-    int trials = argc > 1 ? stoi(argv[1]) : 200;
+    int trials = argc > 1 ? stoi(argv[1]) : 20;
+    double seconds = argc > 2 ? stod(argv[2]) : 0.05;
+    int only_side = argc > 3 ? stoi(argv[3]) : 0;
     mt19937_64 rng(0x48494c4c544f5053ULL);
     const vector<pair<int, int>> sizes = {
-        {3, 3}, {4, 4}, {5, 5}, {8, 8}, {10, 10}, {15, 15}, {20, 20}};
+        {1, 20}, {2, 20}, {3, 20}, {4, 10}, {3, 3}, {4, 4}, {5, 5},
+        {6, 6}, {7, 7}, {8, 8}, {10, 10}, {15, 15}, {20, 20}};
     for (auto [R, C] : sizes) {
+        if (only_side && (R != only_side || C != only_side)) continue;
         long long total_swaps = 0, total_worst = 0;
         int min_swaps = R * C, max_swaps = 0;
         auto start = chrono::steady_clock::now();
@@ -69,16 +73,17 @@ int main(int argc, char** argv) {
             shuffle(values.begin(), values.end(), rng);
             vector<vector<int>> matrix(R, vector<int>(C));
             for (int i = 0; i < R * C; ++i) matrix[i / C][i % C] = values[i];
-            auto swaps = get_swaps(matrix);
+            hollan::Problem p(matrix);
+            auto candidate = hollan::solve_for(p, seconds);
+            auto swaps = hollan::swaps_for_order(p, candidate.order);
             auto final_matrix = apply_swaps(matrix, swaps);
             auto [ok, worst] = authoritative_eval(final_matrix);
             if (!ok) {
                 cerr << "INVALID " << R << 'x' << C << " trial " << t << '\n';
                 return 2;
             }
-            hollan::Problem p(matrix);
-            auto target = hollan::baseline_order(p);
-            assert(static_cast<int>(swaps.size()) == p.n - hollan::cycle_count(p, target));
+            assert(hollan::connected_order(p, candidate.order));
+            assert(static_cast<int>(swaps.size()) == p.n - hollan::cycle_count(p, candidate.order));
             total_swaps += swaps.size();
             total_worst += worst;
             min_swaps = min(min_swaps, static_cast<int>(swaps.size()));
