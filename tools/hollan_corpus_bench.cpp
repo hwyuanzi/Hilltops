@@ -82,7 +82,8 @@ static void add_random(vector<Case>& out, int rows, int cols, int count,
 static vector<Case> make_corpus(const string& name) {
     vector<Case> out;
     bool heldout_seeds = name == "heldout" || name == "20x20heldout";
-    uint64_t base = heldout_seeds ? 0xd1b54a32d192ed03ULL : 0x243f6a8885a308d3ULL;
+    uint64_t base = name == "20x20validation" ? 0x94d049bb133111ebULL
+                  : heldout_seeds ? 0xd1b54a32d192ed03ULL : 0x243f6a8885a308d3ULL;
     if (name == "full" || name == "train") {
         add_random(out, 5, 5, 1000, base + 0x10000, "random");
         add_random(out, 8, 8, 500, base + 0x20000, "random");
@@ -109,7 +110,7 @@ static vector<Case> make_corpus(const string& name) {
         add_random(out, 3, 20, 30, base + 0x70000, "thin");
         add_random(out, 7, 13, 30, base + 0x80000, "rectangle");
         add_random(out, 11, 17, 30, base + 0x90000, "rectangle");
-    } else if (name == "20x20" || name == "20x20heldout") {
+    } else if (name == "20x20" || name == "20x20heldout" || name == "20x20validation") {
         add_random(out, 20, 20, 50, base + 0x50000, "random");
     } else {
         cerr << "unknown corpus: " << name << '\n';
@@ -176,7 +177,11 @@ int main(int argc, char** argv) {
         const Case& tc = corpus[index];
         hollan::Problem p(tc.matrix);
         auto start = chrono::steady_clock::now();
+#ifdef HOLLAN_BASELINE_API
+        hollan::Candidate candidate = hollan::solve_for(p, seconds);
+#else
         hollan::Candidate candidate = hollan::solve_for(p, seconds, nullptr, iterations);
+#endif
         vector<vector<int>> swaps = hollan::swaps_for_order(p, candidate.order);
         double elapsed_ms = 1000.0 * chrono::duration<double>(chrono::steady_clock::now() - start).count();
 

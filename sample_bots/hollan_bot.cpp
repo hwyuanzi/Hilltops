@@ -111,6 +111,7 @@ struct SearchStats {
     int local_wins = 0;
     int beam_wins = 0;
     int exact_wins = 0;
+    int random_beam_wins = 0;
     int random_repair_wins = 0;
     int random_restart_wins = 0;
     int destroy_repair_wins = 0;
@@ -394,6 +395,124 @@ static vector<int> repair_order(const Problem& p, mt19937_64& rng,
         select(current_cell);
     }
     return order;
+}
+
+struct RepairBeamState {
+    vector<int> seq, where, order, frontier;
+    vector<unsigned char> used, in_frontier;
+    int cycles = 0;
+    double heuristic = 0.0, merit = 0.0;
+
+    explicit RepairBeamState(int n = 0)
+        : seq(n), where(n), used(n, 0), in_frontier(n, 0), cycles(n) {
+        iota(seq.begin(), seq.end(), 0);
+        iota(where.begin(), where.end(), 0);
+        order.reserve(n);
+        frontier.reserve(n);
+    }
+};
+
+static void repair_beam_select(const Problem& p, RepairBeamState& s, int v) {
+    s.used[v] = 1;
+    s.in_frontier[v] = 0;
+    s.order.push_back(v);
+    for (int u : p.nbr[v]) if (!s.used[u] && !s.in_frontier[u]) {
+        s.in_frontier[u] = 1;
+        s.frontier.push_back(u);
+    }
+}
+
+// Beam search over the identity-repair process. A state branches only when the
+// next identity assignment is disconnected, so it explores a much narrower
+// and more relevant space than the general connected-order beam.
+static vector<int> repair_beam_order(const Problem& p, const RepairWeights& w,
+                                     int width, int branch,
+                                     const chrono::steady_clock::time_point& deadline,
+                                     bool accumulate_merit = true) {
+    if (p.n == 0) return {};
+    RepairBeamState initial(p.n);
+    repair_beam_select(p, initial, p.pos[0]);
+    vector<RepairBeamState> beam{std::move(initial)};
+    for (int k = 1; k < p.n; ++k) {
+        if (chrono::steady_clock::now() >= deadline) return {};
+        vector<RepairBeamState> next;
+        next.reserve(width * branch);
+        for (const RepairBeamState& state : beam) {
+            int current_cell = p.pos[state.seq[k]];
+            if (state.in_frontier[current_cell]) {
+                RepairBeamState child = state;
+                repair_beam_select(p, child, current_cell);
+                child.merit = 1000000.0 * child.cycles
+                            + (accumulate_merit ? child.heuristic : 0.0);
+                next.push_back(std::move(child));
+                continue;
+            }
+            vector<pair<double, int>> choices;
+            int displaced = state.seq[k];
+            int displaced_cell = p.pos[displaced];
+            for (int v : state.frontier) if (!state.used[v]) {
+                int label = p.rank_at[v], j = state.where[label];
+                if (j <= k) continue;
+                int fresh = 0, selected_nbr = 0;
+                double upcoming = 0.0;
+                bool exposes_displaced = false;
+                for (int u : p.nbr[v]) {
+                    if (state.used[u]) ++selected_nbr;
+                    else if (!state.in_frontier[u]) ++fresh;
+                    if (u == displaced_cell) exposes_displaced = true;
+                }
+                for (int d = 1; d <= w.lookahead && k + d < p.n; ++d) {
+                    int u = p.pos[state.seq[k + d]];
+                    if (!state.used[u] && !state.in_frontier[u] &&
+                        find(p.nbr[v].begin(), p.nbr[v].end(), u) != p.nbr[v].end())
+                        upcoming += 1.0 / d;
+                }
+                double score = (exposes_displaced ? w.expose_displaced : 0.0)
+                             + w.expose_upcoming * upcoming
+                             + w.new_frontier * fresh
+                             + w.selected_neighbors * selected_nbr
+                             + w.delay * double(j - k) / max(1, p.n);
+                choices.push_back({score, label});
+            }
+            int keep = min(branch, static_cast<int>(choices.size()));
+            partial_sort(choices.begin(), choices.begin() + keep, choices.end(),
+                         [](const auto& a, const auto& b) { return a.first > b.first; });
+            for (int q = 0; q < keep; ++q) {
+                RepairBeamState child = state;
+                int label = choices[q].second;
+                int j = child.where[label];
+                int displaced_label = child.seq[k];
+                // Swapping two images splits a cycle iff their source indices
+                // are currently in the same permutation cycle.
+                int x = k;
+                do {
+                    x = child.seq[x];
+                } while (x != k && x != j);
+                bool same_cycle = x == j;
+                swap(child.seq[k], child.seq[j]);
+                child.where[displaced_label] = j;
+                child.where[label] = k;
+                child.cycles += same_cycle ? 1 : -1;
+                repair_beam_select(p, child, p.pos[child.seq[k]]);
+                child.heuristic = accumulate_merit
+                    ? child.heuristic + choices[q].first : choices[q].first;
+                child.merit = 1000000.0 * child.cycles + child.heuristic;
+                next.push_back(std::move(child));
+            }
+        }
+        int keep = min(width, static_cast<int>(next.size()));
+        if (keep == 0) return {};
+        partial_sort(next.begin(), next.begin() + keep, next.end(),
+                     [](const RepairBeamState& a, const RepairBeamState& b) {
+                         return a.merit > b.merit;
+                     });
+        next.resize(keep);
+        beam = std::move(next);
+    }
+    int best = 0;
+    for (int i = 1; i < static_cast<int>(beam.size()); ++i)
+        if (beam[i].cycles > beam[best].cycles) best = i;
+    return std::move(beam[best].order);
 }
 
 // Swapping adjacent targets changes the cycle count by exactly one. If the two
@@ -785,9 +904,8 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
                            + chrono::duration<double>(min(2.0, seconds * 0.12));
         auto beam_stop = min(deadline,
             chrono::time_point_cast<chrono::steady_clock::duration>(beam_raw_stop));
-        int width = 64;
-        vector<int> order = beam_order(p, width, 4, beam_stop);
-        if (!order.empty()) {
+        auto consider_beam = [&](vector<int> order) {
+            if (order.empty()) return;
             Candidate c = evaluate(p, std::move(order));
             adjacent_improve(p, c);
             if (better(c, best)) {
@@ -797,6 +915,19 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
                     stats->last_improvement_ms = elapsed_ms();
                 }
             }
+        };
+        if (p.n > 225) {
+            int width = seconds >= 2.0 ? 64 : 32;
+            consider_beam(repair_beam_order(
+                p, repair_deterministic[4], width, 3, beam_stop));
+            if (seconds >= 2.0 && chrono::steady_clock::now() < beam_stop)
+                consider_beam(repair_beam_order(
+                    p, repair_deterministic[5], 32, 4, beam_stop));
+            if (seconds >= 2.0 && chrono::steady_clock::now() < beam_stop)
+                consider_beam(repair_beam_order(
+                    p, repair_deterministic[6], 32, 3, beam_stop));
+        } else {
+            consider_beam(beam_order(p, 64, 4, beam_stop));
         }
     }
     if (stats) {
@@ -825,10 +956,37 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
     int iteration = 0;
     while (chrono::steady_clock::now() < deadline &&
            (iteration_limit < 0 || iteration < iteration_limit)) {
+        if (p.n > 225 && (iteration & 3) == 0) {
+            RepairWeights rw = repair_deterministic[4 + rng() % 3];
+            rw.expose_displaced *= 0.3 + double(rng() % 2700) / 1000.0;
+            rw.expose_upcoming *= 0.3 + double(rng() % 2400) / 1000.0;
+            rw.new_frontier += double(int(rng() % 601) - 300) / 100.0;
+            rw.selected_neighbors += double(int(rng() % 401) - 200) / 100.0;
+            rw.delay += double(int(rng() % 601) - 300) / 100.0;
+            int width = (iteration & 4) ? 16 : 8;
+            vector<int> order = repair_beam_order(p, rw, width, 3, deadline);
+            if (!order.empty()) {
+                Candidate c = evaluate(p, std::move(order));
+                adjacent_improve(p, c);
+                if (better(c, best)) {
+                    best = std::move(c);
+                    if (stats) {
+                        ++stats->random_beam_wins;
+                        stats->last_improvement_ms = elapsed_ms();
+                    }
+                    int before = best.cycles;
+                    transposition_improve(p, best, rng, 12 * p.n, deadline);
+                    if (stats) stats->local_wins += best.cycles - before;
+                }
+            }
+            ++iteration;
+            continue;
+        }
         if ((iteration & 1) == 1) {
-            // Keep the randomized distribution based on the original four
-            // robust templates; later entries are deterministic specialists.
-            RepairWeights rw = repair_deterministic[rng() % 4];
+            int repair_family = p.n >= 60 ? int(rng() % 16) : -1;
+            RepairWeights rw = p.n >= 60
+                ? repair_deterministic[repair_family < 14 ? 6 : 4 + (repair_family & 1)]
+                : repair_deterministic[rng() % 4];
             rw.noise = 2.0 + double(rng() % 10000) / 100.0;
             rw.expose_displaced *= 0.2 + double(rng() % 3000) / 1000.0;
             rw.expose_upcoming *= double(rng() % 3000) / 1000.0;

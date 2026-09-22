@@ -39,10 +39,10 @@ int main(int argc, char** argv) {
     uint64_t base = 0xd1b54a32d192ed03ULL + 0x50000ULL;
     ofstream out(path);
     out << "index,seed,rows,cols,fallback,deterministic,post_local,post_beam,post_exact,final,"
-           "det_wins,local_wins,beam_wins,exact_wins,repair_wins,restart_wins,destroy_wins,"
+           "det_wins,local_wins,beam_wins,exact_wins,random_beam_wins,repair_wins,restart_wins,destroy_wins,"
            "iterations,det_ms,local_ms,beam_ms,exact_ms,last_improvement_ms,total_ms\n";
     long long fallback = 0, deterministic = 0, local = 0, beam = 0, final = 0;
-    long long det_wins = 0, local_wins = 0, beam_wins = 0, repair_wins = 0;
+    long long det_wins = 0, local_wins = 0, beam_wins = 0, random_beam_wins = 0, repair_wins = 0;
     long long restart_wins = 0, destroy_wins = 0, iterations = 0;
     double last_ms = 0.0, total_ms = 0.0;
     for (int i = 0; i < trials; ++i) {
@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
         out << i << ',' << seed << ',' << rows << ',' << cols << ',' << s.fallback_swaps << ','
             << s.deterministic_swaps << ',' << s.post_local_swaps << ',' << s.post_beam_swaps << ','
             << s.post_exact_swaps << ',' << s.final_swaps << ',' << s.deterministic_wins << ','
-            << s.local_wins << ',' << s.beam_wins << ',' << s.exact_wins << ','
+            << s.local_wins << ',' << s.beam_wins << ',' << s.exact_wins << ',' << s.random_beam_wins << ','
             << s.random_repair_wins << ',' << s.random_restart_wins << ','
             << s.destroy_repair_wins << ',' << s.iterations << ',' << s.deterministic_ms << ','
             << s.local_ms << ',' << s.beam_ms << ',' << s.exact_ms << ','
@@ -72,6 +72,7 @@ int main(int argc, char** argv) {
         det_wins += s.deterministic_wins;
         local_wins += s.local_wins;
         beam_wins += s.beam_wins;
+        random_beam_wins += s.random_beam_wins;
         repair_wins += s.random_repair_wins;
         restart_wins += s.random_restart_wins;
         destroy_wins += s.destroy_repair_wins;
@@ -87,6 +88,7 @@ int main(int argc, char** argv) {
          << " local=" << avg(local) << " beam=" << avg(beam) << " final=" << avg(final) << '\n'
          << "wins/run det=" << avg(det_wins) << " local_cycles=" << avg(local_wins)
          << " beam=" << avg(beam_wins) << " random_repair=" << avg(repair_wins)
+         << " random_beam=" << avg(random_beam_wins)
          << " restart=" << avg(restart_wins) << " destroy=" << avg(destroy_wins) << '\n'
          << "iterations/run=" << avg(iterations) << " last_improvement_ms=" << last_ms / trials
          << " total_ms=" << total_ms / trials << " output=" << path << '\n';
