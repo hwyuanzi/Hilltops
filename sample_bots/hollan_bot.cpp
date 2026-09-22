@@ -744,7 +744,9 @@ static Candidate solve_for(const Problem& p, double seconds) {
         auto exact_stop = min(deadline,
             chrono::time_point_cast<chrono::steady_clock::duration>(exact_raw_stop));
         ExactSearch exact(p, best, exact_stop);
-        if (exact.run()) return best;
+        // Even after proving the primary optimum, keep the remaining anytime
+        // budget: other optimal-swap targets can improve maxWorstDistance.
+        exact.run();
     }
     int iteration = 0;
     while (chrono::steady_clock::now() < deadline) {
