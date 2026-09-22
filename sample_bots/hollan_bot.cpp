@@ -98,6 +98,30 @@ struct Candidate {
     int worst = numeric_limits<int>::max();
 };
 
+// Populated only by offline benchmark tools. Passing nullptr has no effect on
+// the submitted solver's decisions or output.
+struct SearchStats {
+    int fallback_swaps = -1;
+    int deterministic_swaps = -1;
+    int post_local_swaps = -1;
+    int post_beam_swaps = -1;
+    int post_exact_swaps = -1;
+    int final_swaps = -1;
+    int deterministic_wins = 0;
+    int local_wins = 0;
+    int beam_wins = 0;
+    int exact_wins = 0;
+    int random_repair_wins = 0;
+    int random_restart_wins = 0;
+    int destroy_repair_wins = 0;
+    int iterations = 0;
+    double deterministic_ms = 0.0;
+    double local_ms = 0.0;
+    double beam_ms = 0.0;
+    double exact_ms = 0.0;
+    double last_improvement_ms = 0.0;
+};
+
 // Guaranteed connected-prefix ordering. It fixes every rank whose original
 // cell is already on the frontier and otherwise displaces a late rank.
 static vector<int> baseline_order(const Problem& p) {
@@ -692,9 +716,15 @@ public:
     }
 };
 
-static Candidate solve_for(const Problem& p, double seconds) {
+static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats = nullptr,
+                           int iteration_limit = -1) {
+    auto solve_start = chrono::steady_clock::now();
+    auto elapsed_ms = [&]() {
+        return 1000.0 * chrono::duration<double>(chrono::steady_clock::now() - solve_start).count();
+    };
     Candidate best = evaluate(p, baseline_order(p));
     adjacent_improve(p, best);
+    if (stats) stats->fallback_swaps = p.n - best.cycles;
     if (p.n <= 1 || seconds <= 0.0) return best;
 
     mt19937_64 rng(matrix_seed(p));
@@ -703,11 +733,23 @@ static Candidate solve_for(const Problem& p, double seconds) {
         {100, 5, 3, -1, 2, 0, 24},
         {30, 15, -1, 2, -2, 0, 10},
         {3000, 0, 0, 0, 0, 0, 8},
+        {4.092705, 44.818952, 6.683821, -0.545920, 4.979314, 0, 64},
+        {4.142114, 78.174754, 9.560245, 0.256275, 7.571936, 0, 48},
+        {5.527978, 79.822470, 5.858314, -5.044624, 5.824673, 0, 12},
     };
-    for (const RepairWeights& w : repair_deterministic) {
+    for (int repair_index = 0;
+         repair_index < static_cast<int>(repair_deterministic.size()); ++repair_index) {
+        // The learned specialists were trained on large, high-frontier boards;
+        // below 60 cells they add cost and can perturb a stronger small-board
+        // search trajectory without a consistent cycle benefit.
+        if (repair_index >= 4 && p.n < 60) continue;
+        const RepairWeights& w = repair_deterministic[repair_index];
         Candidate c = evaluate(p, repair_order(p, rng, w));
         adjacent_improve(p, c);
-        if (better(c, best)) best = std::move(c);
+        if (better(c, best)) {
+            best = std::move(c);
+            if (stats) ++stats->deterministic_wins;
+        }
     }
     const vector<Weights> deterministic = {
         {10000, 1000, 80, 4, 1, 0.5, 0, 0, 0, 16},
@@ -719,12 +761,25 @@ static Candidate solve_for(const Problem& p, double seconds) {
     for (const Weights& w : deterministic) {
         Candidate c = evaluate(p, greedy_order(p, rng, w, p.pos[0]));
         adjacent_improve(p, c);
-        if (better(c, best)) best = std::move(c);
+        if (better(c, best)) {
+            best = std::move(c);
+            if (stats) ++stats->deterministic_wins;
+        }
+    }
+    if (stats) {
+        stats->deterministic_swaps = p.n - best.cycles;
+        stats->deterministic_ms = elapsed_ms();
     }
 
     auto raw_deadline = chrono::steady_clock::now() + chrono::duration<double>(seconds);
     auto deadline = chrono::time_point_cast<chrono::steady_clock::duration>(raw_deadline);
+    int cycles_before_local = best.cycles;
     transposition_improve(p, best, rng, 30 * p.n, deadline);
+    if (stats) {
+        stats->local_wins += best.cycles - cycles_before_local;
+        stats->post_local_swaps = p.n - best.cycles;
+        stats->local_ms = elapsed_ms();
+    }
     if (chrono::steady_clock::now() < deadline) {
         auto beam_raw_stop = chrono::steady_clock::now()
                            + chrono::duration<double>(min(2.0, seconds * 0.12));
@@ -735,8 +790,18 @@ static Candidate solve_for(const Problem& p, double seconds) {
         if (!order.empty()) {
             Candidate c = evaluate(p, std::move(order));
             adjacent_improve(p, c);
-            if (better(c, best)) best = std::move(c);
+            if (better(c, best)) {
+                best = std::move(c);
+                if (stats) {
+                    ++stats->beam_wins;
+                    stats->last_improvement_ms = elapsed_ms();
+                }
+            }
         }
+    }
+    if (stats) {
+        stats->post_beam_swaps = p.n - best.cycles;
+        stats->beam_ms = elapsed_ms();
     }
     if (p.n <= 36 && chrono::steady_clock::now() < deadline) {
         auto exact_raw_stop = chrono::steady_clock::now()
@@ -746,12 +811,24 @@ static Candidate solve_for(const Problem& p, double seconds) {
         ExactSearch exact(p, best, exact_stop);
         // Even after proving the primary optimum, keep the remaining anytime
         // budget: other optimal-swap targets can improve maxWorstDistance.
+        int cycles_before_exact = best.cycles;
         exact.run();
+        if (stats && best.cycles > cycles_before_exact) {
+            stats->exact_wins += best.cycles - cycles_before_exact;
+            stats->last_improvement_ms = elapsed_ms();
+        }
+    }
+    if (stats) {
+        stats->post_exact_swaps = p.n - best.cycles;
+        stats->exact_ms = elapsed_ms();
     }
     int iteration = 0;
-    while (chrono::steady_clock::now() < deadline) {
+    while (chrono::steady_clock::now() < deadline &&
+           (iteration_limit < 0 || iteration < iteration_limit)) {
         if ((iteration & 1) == 1) {
-            RepairWeights rw = repair_deterministic[rng() % repair_deterministic.size()];
+            // Keep the randomized distribution based on the original four
+            // robust templates; later entries are deterministic specialists.
+            RepairWeights rw = repair_deterministic[rng() % 4];
             rw.noise = 2.0 + double(rng() % 10000) / 100.0;
             rw.expose_displaced *= 0.2 + double(rng() % 3000) / 1000.0;
             rw.expose_upcoming *= double(rng() % 3000) / 1000.0;
@@ -761,7 +838,13 @@ static Candidate solve_for(const Problem& p, double seconds) {
             adjacent_improve(p, c);
             if (better(c, best)) {
                 best = std::move(c);
+                if (stats) {
+                    ++stats->random_repair_wins;
+                    stats->last_improvement_ms = elapsed_ms();
+                }
+                int before = best.cycles;
                 transposition_improve(p, best, rng, 12 * p.n, deadline);
+                if (stats) stats->local_wins += best.cycles - before;
             }
             ++iteration;
             continue;
@@ -775,22 +858,36 @@ static Candidate solve_for(const Problem& p, double seconds) {
         w.future_rank += double(int(rng() % 601) - 300) / 50.0;
 
         vector<int> order;
-        if ((iteration++ & 3) != 0 && p.n >= 8) {
+        bool used_destroy_repair = (iteration & 3) != 0 && p.n >= 8;
+        if (used_destroy_repair) {
             int hi = max(2, p.n - 2);
             int cut = 1 + int(rng() % hi);
             // Bias toward large retained prefixes, with occasional broad restart.
             if (rng() & 1) cut = max(1, p.n - 1 - int(rng() % max(2, p.n / 3)));
             order = greedy_order(p, rng, w, best.order[0], &best.order, cut);
         } else {
+            ++iteration;
             int root = (iteration % 17 == 0) ? int(rng() % p.n) : p.pos[0];
             order = greedy_order(p, rng, w, root);
         }
+        if (used_destroy_repair) ++iteration;
         Candidate c = evaluate(p, std::move(order));
         adjacent_improve(p, c);
         if (better(c, best)) {
             best = std::move(c);
+            if (stats) {
+                if (used_destroy_repair) ++stats->destroy_repair_wins;
+                else ++stats->random_restart_wins;
+                stats->last_improvement_ms = elapsed_ms();
+            }
+            int before = best.cycles;
             transposition_improve(p, best, rng, 12 * p.n, deadline);
+            if (stats) stats->local_wins += best.cycles - before;
         }
+    }
+    if (stats) {
+        stats->iterations = iteration;
+        stats->final_swaps = p.n - best.cycles;
     }
     return best;
 }
