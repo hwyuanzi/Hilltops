@@ -333,6 +333,9 @@ static vector<int> repair_order(const Problem& p, mt19937_64& rng,
     vector<unsigned char> used(p.n, 0), in_frontier(p.n, 0);
     vector<int> frontier;
     frontier.reserve(p.n);
+    vector<double> upcoming_at(p.n, 0.0);
+    vector<int> upcoming_stamp(p.n, 0);
+    int stamp = 0;
 
     auto select = [&](int v) {
         used[v] = 1;
@@ -353,6 +356,14 @@ static vector<int> repair_order(const Problem& p, mt19937_64& rng,
             double best_score = -numeric_limits<double>::infinity();
             int displaced = seq[k];
             int displaced_cell = p.pos[displaced];
+            ++stamp;
+            for (int d = 1; d <= w.lookahead && k + d < p.n; ++d) {
+                int u = p.pos[seq[k + d]];
+                if (!used[u] && !in_frontier[u]) {
+                    upcoming_at[u] = 1.0 / d;
+                    upcoming_stamp[u] = stamp;
+                }
+            }
             for (int v : frontier) if (!used[v]) {
                 int label = p.rank_at[v];
                 int j = where[label];
@@ -364,12 +375,7 @@ static vector<int> repair_order(const Problem& p, mt19937_64& rng,
                     if (used[u]) ++selected_nbr;
                     else if (!in_frontier[u]) ++fresh;
                     if (u == displaced_cell) exposes_displaced = true;
-                }
-                for (int d = 1; d <= w.lookahead && k + d < p.n; ++d) {
-                    int u = p.pos[seq[k + d]];
-                    if (!used[u] && !in_frontier[u] &&
-                        find(p.nbr[v].begin(), p.nbr[v].end(), u) != p.nbr[v].end())
-                        upcoming += 1.0 / d;
+                    if (upcoming_stamp[u] == stamp) upcoming += upcoming_at[u];
                 }
                 double score = (exposes_displaced ? w.expose_displaced : 0.0)
                              + w.expose_upcoming * upcoming
