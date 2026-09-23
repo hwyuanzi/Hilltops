@@ -433,6 +433,9 @@ static vector<int> repair_beam_order(const Problem& p, const RepairWeights& w,
     RepairBeamState initial(p.n);
     repair_beam_select(p, initial, p.pos[0]);
     vector<RepairBeamState> beam{std::move(initial)};
+    vector<double> upcoming_at(p.n, 0.0);
+    vector<int> upcoming_stamp(p.n, 0);
+    int stamp = 0;
     for (int k = 1; k < p.n; ++k) {
         if (chrono::steady_clock::now() >= deadline) return {};
         vector<RepairBeamState> next;
@@ -450,6 +453,14 @@ static vector<int> repair_beam_order(const Problem& p, const RepairWeights& w,
             vector<pair<double, int>> choices;
             int displaced = state.seq[k];
             int displaced_cell = p.pos[displaced];
+            ++stamp;
+            for (int d = 1; d <= w.lookahead && k + d < p.n; ++d) {
+                int u = p.pos[state.seq[k + d]];
+                if (!state.used[u] && !state.in_frontier[u]) {
+                    upcoming_at[u] = 1.0 / d;
+                    upcoming_stamp[u] = stamp;
+                }
+            }
             for (int v : state.frontier) if (!state.used[v]) {
                 int label = p.rank_at[v], j = state.where[label];
                 if (j <= k) continue;
@@ -460,12 +471,7 @@ static vector<int> repair_beam_order(const Problem& p, const RepairWeights& w,
                     if (state.used[u]) ++selected_nbr;
                     else if (!state.in_frontier[u]) ++fresh;
                     if (u == displaced_cell) exposes_displaced = true;
-                }
-                for (int d = 1; d <= w.lookahead && k + d < p.n; ++d) {
-                    int u = p.pos[state.seq[k + d]];
-                    if (!state.used[u] && !state.in_frontier[u] &&
-                        find(p.nbr[v].begin(), p.nbr[v].end(), u) != p.nbr[v].end())
-                        upcoming += 1.0 / d;
+                    if (upcoming_stamp[u] == stamp) upcoming += upcoming_at[u];
                 }
                 double score = (exposes_displaced ? w.expose_displaced : 0.0)
                              + w.expose_upcoming * upcoming
