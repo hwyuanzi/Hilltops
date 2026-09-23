@@ -27,3 +27,18 @@ held-out corpus uses a disjoint seed range and is not used for parameter choices
 | Cache beam lookahead | Recomputing future exposure for each frontier cell dominates beam time | Cache upcoming-rank contribution once per beam state; keep same score | 30 train 20x20, 256 fixed iterations and 1 s; 12 train at 5 s; 50 held-out at 1 s | Fixed work exact 30/30 ties, runtime 1.50 -> 0.52 s. Train 1 s -1.70 swaps, 20/10/0; train 5 s -1.17, 5/7/0; held-out 1 s 85.92 -> 84.74, 25/25/0. Full 3,025 case corpus valid. | Keep |
 | 50% randomized beams after cache | Faster beams might now justify replacing weaker repair/rebuild slots | Use half of large-board iterations for beams | 30 train 20x20 at 1 s; 12 at 5 s | 1 s mean -0.13 with 16/3/11; 5 s mean +0.17 with 2/6/4 | Reject; restore 25% |
 | Cache repair lookahead | Deterministic and randomized repair still rescan future ranks for every frontier choice | Cache upcoming-rank contribution once per repair step; keep same score | 30 train 20x20, 256 fixed iterations and 1 s; 12 train at 5 s; 50 held-out at 1 s; full 3,025-case timed corpus | Fixed work exact 30/30 ties, runtime 0.52 -> 0.39 s. Held-out 1 s 84.74 -> 84.44, 7/43/0; full corpus 19.5435 -> 19.4063, 304/2719/2, valid 3,025/3,025; two timed losses were one swap each. | Keep |
+| 37.5% randomized beams | A smaller shift toward the winning phase might retain more search diversity | Replace one of eight randomized repair slots with a beam | 30 train 20x20 at 1 s | Mean +0.07 swaps, 11/4/15 W/T/L | Reject; restore 25% |
+
+Final profile on 20 random 20x20 boards at one second: fallback 283.95, deterministic
+95.45, initial beam 92.25, final 85.05 mean swaps. Final incumbents came from
+randomized beams on 17 boards, the initial beam on one, and destroy/rebuild on
+two. Mean search iterations: 766.8 per run. The profile CSV records the final
+phase for each board (phase identifiers are documented in `SearchStats`).
+
+Final correctness and runtime: 3,025/3,025 frozen-corpus cases valid with
+independent swap replay, connected-target, cycle-count, and worst-distance
+checks; 130/130 sanitizer cases valid over 13 board shapes; 30/30 brute-force
+3x3 optimum matches. At a 1 ms internal budget, 20 random 20x20 cases returned
+valid results in 5.74 ms mean including deterministic setup. A 98-second
+20x20 run, with eight CPU load processes active for 45 seconds, returned a
+valid 80-swap target in 98.024 seconds wall-clock time.

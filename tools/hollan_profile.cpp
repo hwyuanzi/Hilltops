@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
     ofstream out(path);
     out << "index,seed,rows,cols,fallback,deterministic,post_local,post_beam,post_exact,final,"
            "det_wins,local_wins,beam_wins,exact_wins,random_beam_wins,repair_wins,restart_wins,destroy_wins,"
-           "iterations,det_ms,local_ms,beam_ms,exact_ms,last_improvement_ms,total_ms\n";
+           "iterations,final_phase,det_ms,local_ms,beam_ms,exact_ms,last_improvement_ms,total_ms\n";
     long long fallback = 0, deterministic = 0, local = 0, beam = 0, final = 0;
     long long det_wins = 0, local_wins = 0, beam_wins = 0, random_beam_wins = 0, repair_wins = 0;
     long long restart_wins = 0, destroy_wins = 0, iterations = 0;
@@ -61,7 +61,8 @@ int main(int argc, char** argv) {
             << s.post_exact_swaps << ',' << s.final_swaps << ',' << s.deterministic_wins << ','
             << s.local_wins << ',' << s.beam_wins << ',' << s.exact_wins << ',' << s.random_beam_wins << ','
             << s.random_repair_wins << ',' << s.random_restart_wins << ','
-            << s.destroy_repair_wins << ',' << s.iterations << ',' << s.deterministic_ms << ','
+            << s.destroy_repair_wins << ',' << s.iterations << ',' << s.final_phase << ','
+            << s.deterministic_ms << ','
             << s.local_ms << ',' << s.beam_ms << ',' << s.exact_ms << ','
             << s.last_improvement_ms << ',' << elapsed << '\n';
         fallback += s.fallback_swaps;

@@ -116,6 +116,9 @@ struct SearchStats {
     int random_restart_wins = 0;
     int destroy_repair_wins = 0;
     int iterations = 0;
+    // 0 fallback, 1 deterministic, 2 local, 3 initial beam, 4 exact,
+    // 5 random beam, 6 random repair, 7 restart, 8 destroy/rebuild.
+    int final_phase = 0;
     double deterministic_ms = 0.0;
     double local_ms = 0.0;
     double beam_ms = 0.0;
@@ -879,7 +882,10 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
         adjacent_improve(p, c);
         if (better(c, best)) {
             best = std::move(c);
-            if (stats) ++stats->deterministic_wins;
+            if (stats) {
+                ++stats->deterministic_wins;
+                stats->final_phase = 1;
+            }
         }
     }
     const vector<Weights> deterministic = {
@@ -894,7 +900,10 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
         adjacent_improve(p, c);
         if (better(c, best)) {
             best = std::move(c);
-            if (stats) ++stats->deterministic_wins;
+            if (stats) {
+                ++stats->deterministic_wins;
+                stats->final_phase = 1;
+            }
         }
     }
     if (stats) {
@@ -908,6 +917,7 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
     transposition_improve(p, best, rng, 30 * p.n, deadline);
     if (stats) {
         stats->local_wins += best.cycles - cycles_before_local;
+        if (best.cycles > cycles_before_local) stats->final_phase = 2;
         stats->post_local_swaps = p.n - best.cycles;
         stats->local_ms = elapsed_ms();
     }
@@ -924,6 +934,7 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
                 best = std::move(c);
                 if (stats) {
                     ++stats->beam_wins;
+                    stats->final_phase = 3;
                     stats->last_improvement_ms = elapsed_ms();
                 }
             }
@@ -958,6 +969,7 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
         exact.run();
         if (stats && best.cycles > cycles_before_exact) {
             stats->exact_wins += best.cycles - cycles_before_exact;
+            stats->final_phase = 4;
             stats->last_improvement_ms = elapsed_ms();
         }
     }
@@ -984,11 +996,15 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
                     best = std::move(c);
                     if (stats) {
                         ++stats->random_beam_wins;
+                        stats->final_phase = 5;
                         stats->last_improvement_ms = elapsed_ms();
                     }
                     int before = best.cycles;
                     transposition_improve(p, best, rng, 12 * p.n, deadline);
-                    if (stats) stats->local_wins += best.cycles - before;
+                    if (stats) {
+                        stats->local_wins += best.cycles - before;
+                        if (best.cycles > before) stats->final_phase = 2;
+                    }
                 }
             }
             ++iteration;
@@ -1010,11 +1026,15 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
                 best = std::move(c);
                 if (stats) {
                     ++stats->random_repair_wins;
+                    stats->final_phase = 6;
                     stats->last_improvement_ms = elapsed_ms();
                 }
                 int before = best.cycles;
                 transposition_improve(p, best, rng, 12 * p.n, deadline);
-                if (stats) stats->local_wins += best.cycles - before;
+                if (stats) {
+                    stats->local_wins += best.cycles - before;
+                    if (best.cycles > before) stats->final_phase = 2;
+                }
             }
             ++iteration;
             continue;
@@ -1048,11 +1068,15 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
             if (stats) {
                 if (used_destroy_repair) ++stats->destroy_repair_wins;
                 else ++stats->random_restart_wins;
+                stats->final_phase = used_destroy_repair ? 8 : 7;
                 stats->last_improvement_ms = elapsed_ms();
             }
             int before = best.cycles;
             transposition_improve(p, best, rng, 12 * p.n, deadline);
-            if (stats) stats->local_wins += best.cycles - before;
+            if (stats) {
+                stats->local_wins += best.cycles - before;
+                if (best.cycles > before) stats->final_phase = 2;
+            }
         }
     }
     if (stats) {
