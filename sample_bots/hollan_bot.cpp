@@ -437,7 +437,8 @@ static void repair_beam_select(const Problem& p, RepairBeamState& s, int v) {
 static vector<int> repair_beam_order(const Problem& p, const RepairWeights& w,
                                      int width, int branch,
                                      const chrono::steady_clock::time_point& deadline,
-                                     bool accumulate_merit = true) {
+                                     bool accumulate_merit = true,
+                                     mt19937_64* noise_rng = nullptr) {
     if (p.n == 0) return {};
     RepairBeamState initial(p.n);
     repair_beam_select(p, initial, p.pos[0]);
@@ -487,6 +488,10 @@ static vector<int> repair_beam_order(const Problem& p, const RepairWeights& w,
                              + w.new_frontier * fresh
                              + w.selected_neighbors * selected_nbr
                              + w.delay * double(j - k) / max(1, p.n);
+                if (noise_rng && w.noise > 0.0) {
+                    double unit = double((*noise_rng)() >> 11) * (1.0 / 9007199254740992.0);
+                    score += w.noise * (2.0 * unit - 1.0);
+                }
                 choices.push_back({score, label});
             }
             int keep = min(branch, static_cast<int>(choices.size()));
@@ -987,8 +992,9 @@ static Candidate solve_for(const Problem& p, double seconds, SearchStats* stats 
             rw.new_frontier += double(int(rng() % 601) - 300) / 100.0;
             rw.selected_neighbors += double(int(rng() % 401) - 200) / 100.0;
             rw.delay += double(int(rng() % 601) - 300) / 100.0;
+            rw.noise = 5.0;
             int width = (iteration & 4) ? 16 : 8;
-            vector<int> order = repair_beam_order(p, rw, width, 3, deadline);
+            vector<int> order = repair_beam_order(p, rw, width, 3, deadline, true, &rng);
             if (!order.empty()) {
                 Candidate c = evaluate(p, std::move(order));
                 adjacent_improve(p, c);
@@ -1126,8 +1132,8 @@ static vector<vector<int>> swaps_for_order(const Problem& p,
 
 vector<vector<int>> get_swaps(vector<vector<int>> matrix) {
     hollan::Problem problem(matrix);
-    // The official allowance is 120 wall-clock seconds. Ninety-eight seconds
-    // leaves ample time for wrapper I/O, scheduling jitter, and submission.
-    hollan::Candidate best = hollan::solve_for(problem, 98.0);
+    // The competition runner allows 120 seconds per bot. Reserve eight seconds
+    // for compilation, wrapper I/O, scheduling jitter, and output submission.
+    hollan::Candidate best = hollan::solve_for(problem, 112.0);
     return hollan::swaps_for_order(problem, best.order);
 }

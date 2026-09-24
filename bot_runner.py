@@ -9,6 +9,9 @@ import copy
 import traceback
 from multiprocessing import Pool
 
+TIMEOUT_SECONDS = 120
+BASE_URL = "http://localhost:33333"
+
 PYTHON_WRAPPER = """
 # --- USER CODE BEGINS ---
 {USER_CODE}
@@ -136,8 +139,6 @@ class BotConfig:
         self.language = language
 
 class Bot:
-    def __init__(self, timeout=5.0):
-        self.timeout = timeout
 
     def _matrix_to_stdin(self, matrix):
         R, C = len(matrix), len(matrix[0])
@@ -206,29 +207,29 @@ class Bot:
                 code = JULIA_WRAPPER.replace("{USER_CODE}", user_code)
                 script_path = os.path.join(tmpdir, "wrapper.jl")
                 with open(script_path, "w") as f: f.write(code)
-                cmd = ["julia", script_path]
+                cmd = ["julia", "-t", "auto", script_path]
             
             else:
                 raise ValueError(f"Unsupported language: {config.language}")
 
             try:
-                proc = subprocess.run(cmd, input=stdin_data, text=True, capture_output=True, timeout=self.timeout)
+                proc = subprocess.run(cmd, input=stdin_data, text=True, capture_output=True, timeout=TIMEOUT_SECONDS)
                 if proc.returncode != 0:
                     raise Exception(f"Runtime Error:\n{proc.stderr}")
                 
                 return self._parse_stdout_to_swaps(proc.stdout, matrix)
             
             except subprocess.TimeoutExpired:
-                raise Exception(f"Execution exceeded the {self.timeout} second timeout limit.")
+                raise Exception(f"Execution exceeded the {TIMEOUT_SECONDS} second timeout limit.")
 
 
-def run_bot(game_id: str, base_url: str, bot: Bot, config: BotConfig):
+def run_bot(game_id: str, config: BotConfig):
     print(f"[{config.name}] Joining game {game_id}...")
     
     # Helper to send a POST request with JSON
     def post_json(endpoint, payload):
         req = urllib.request.Request(
-            f"{base_url}{endpoint}", 
+            f"{BASE_URL}{endpoint}",
             data=json.dumps(payload).encode('utf-8'), 
             headers={'Content-Type': 'application/json'}
         )
@@ -242,7 +243,7 @@ def run_bot(game_id: str, base_url: str, bot: Bot, config: BotConfig):
 
     # Helper to send a GET request
     def get_json(endpoint):
-        req = urllib.request.Request(f"{base_url}{endpoint}")
+        req = urllib.request.Request(f"{BASE_URL}{endpoint}")
         with urllib.request.urlopen(req) as response:
             return json.loads(response.read().decode('utf-8'))
 
@@ -271,7 +272,7 @@ def run_bot(game_id: str, base_url: str, bot: Bot, config: BotConfig):
     matrix_copy = copy.deepcopy(matrix)
 
     try:
-        swaps = bot.get_swaps(config, matrix)
+        swaps = Bot().get_swaps(config, matrix)
 
         # 4. Format payload (auto-filling val1 and val2)
         formatted_swaps = []
@@ -311,11 +312,9 @@ if __name__ == "__main__":
     # Ensure the user provided the argument to prevent an IndexError
     if len(sys.argv) > 1:
         game_id = sys.argv[1]
-        base_url = "http://localhost:33333"
-        bot = Bot()
 
         with Pool() as pool:
-            pool.starmap(run_bot, [(game_id, base_url, bot, config) for config in bot_configs])
+            pool.starmap(run_bot, [(game_id, config) for config in bot_configs])
 
     else:
         print("Please provide a name. Usage: python3 bot_runner.py [game_id]")
