@@ -2,7 +2,7 @@
 
 Starting solver: `7a157e8c54874bb15e353c833f1f5d6e4ebd7001`.
 
-All paired comparisons use `hollan_corpus_bench.cpp` and identical deterministic
+All paired comparisons use `tools/hollan_corpus_bench.cpp` and identical deterministic
 matrices. The full frozen development corpus contains the requested 2,400 square
 random cases plus 600 thin/rectangular cases and 25 structured patterns. The
 held-out corpus uses a disjoint seed range and is not used for parameter choices.

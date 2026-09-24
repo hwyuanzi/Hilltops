@@ -1,4 +1,18 @@
-*.txt
-engine/hilltops_server
+# Runtime files and compiled programs
+/matrix_*.txt
+/engine/hilltops_server
+/build/
+/tmp/
+*.o
+*.dSYM/
+
+# Python and operating-system caches
 .DS_Store
 __pycache__/
+*.py[cod]
+.pytest_cache/
+
+# New benchmark output; selected historical CSVs under results/ stay tracked
+/hollan_results.csv
+/hollan_profile.csv
+/results/**/*.csv

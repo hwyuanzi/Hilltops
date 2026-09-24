@@ -2,7 +2,7 @@
 
 Baseline: commit `7baa707`. The competition runner is copied from Emil's
 `21e827d` (`TIMEOUT_SECONDS = 120`, a new `Bot()` per entrant, Julia `-t auto`).
-All bot experiments used the frozen matrices in `hollan_corpus_bench.cpp`,
+All bot experiments used the frozen matrices in `tools/hollan_corpus_bench.cpp`,
 compiled with `c++ -std=c++17 -O3`, and checked the returned swaps with the
 independent Hilltop evaluator. Lower swap counts are better. Paired timings are
 wall-clock solver budgets on this machine, not performance guarantees for the
@@ -68,7 +68,7 @@ the C++ bot, returned 80 swaps, passed an independent Hilltop check, and took
 
 The checkpoint was pushed to `origin/main` before these trials. Each timed
 variant was compared against that frozen executable on identical held-out
-20x20 matrices; `hollan_compare.py` checked corpus identity and independent
+20x20 matrices; `tools/hollan_compare.py` checked corpus identity and independent
 swap validity. The held-out set has now been used to select variants, so it is
 no longer an untouched final test set. Negative deltas are fewer swaps.
 

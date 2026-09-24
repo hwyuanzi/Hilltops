@@ -6,6 +6,23 @@ Author: Emil Parikh
 
 The server is plain Python with no dependencies (I used Python 3.10, but earlier might work).
 
+## Repository layout
+
+- `sample_bots/hollan_bot.cpp`: current single-file competition bot.
+- `bot_runner.py` and `server.py`: bot client and game server entry points.
+- `sample_bots/bot.*`: examples used by the default runner configuration.
+- `engine/`: C++ game server source and build instructions.
+- `tools/`: benchmark and experiment utilities.
+- `results/hollan_evolution/`: selected historical benchmark CSVs. New benchmark CSVs are ignored by Git unless explicitly added.
+- `docs/`: experiment notes; `archive/`: superseded reference material.
+
+From the repository root, a short correctness benchmark can be run with:
+
+```sh
+c++ -std=c++17 -O3 tools/hollan_corpus_bench.cpp -o /tmp/hollan_corpus_bench
+/tmp/hollan_corpus_bench full 0.02 results/hollan_evolution/local_check.csv
+```
+
 ## Getting Started
 ### Server
 1. **Build the binary**: If it's your first time, head to `engine/` to build the C++ `hilltops_server` binary for your system.
