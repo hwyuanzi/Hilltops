@@ -1,2 +1,4 @@
 *.txt
 engine/hilltops_server
+.DS_Store
+__pycache__/

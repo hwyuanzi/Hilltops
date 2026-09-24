@@ -1132,8 +1132,8 @@ static vector<vector<int>> swaps_for_order(const Problem& p,
 
 vector<vector<int>> get_swaps(vector<vector<int>> matrix) {
     hollan::Problem problem(matrix);
-    // The competition runner allows 120 seconds per bot. Reserve eight seconds
+    // The competition runner allows 120 seconds per bot. Reserve twelve seconds
     // for compilation, wrapper I/O, scheduling jitter, and output submission.
-    hollan::Candidate best = hollan::solve_for(problem, 112.0);
+    hollan::Candidate best = hollan::solve_for(problem, 108.0);
     return hollan::swaps_for_order(problem, best.order);
 }
